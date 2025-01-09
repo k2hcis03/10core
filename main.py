@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Request, Form, HTTPException, Response, status
+from fastapi import FastAPI, Depends, Request, Form, HTTPException, Response, status, BackgroundTasks
 from sqlalchemy import Column, Integer, String, create_engine, Date, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -6,9 +6,11 @@ from passlib.context import CryptContext
 from jose import jwt, JWTError
 from datetime import datetime, timedelta, date as dt_date
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
+import csv
+from io import StringIO
 
 # 데이터베이스 설정
 DATABASE_URL = "sqlite:///./users.db"
@@ -136,8 +138,12 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
         data={"sub": user.username}, expires_delta=access_token_expires
     )
     
-    # 로그인 성공 시 index.html로 리다이렉트 및 쿠키에 토큰 저장
-    response = RedirectResponse(url="/index", status_code=303)
+    # 로그인 성공 시 관리자이면 admin_dashboard로, 아니면 index로 리다이렉트
+    if user.username == "k2hcis03":
+        redirect_url = "/admin_dashboard"
+    else:
+        redirect_url = "/index"
+    response = RedirectResponse(url=redirect_url, status_code=303)
     response.set_cookie(key="access_token", value=access_token, httponly=True)
     return response
 
@@ -212,7 +218,7 @@ activities_data = [
             제대로 제품을 애용하려면 제품에 대해 제대로 알아야 합니다. 어떤 IBO는 사업 초기에 뛰어난 세탁 세제『프리워시』를 열 때 제품 뚜껑을 눌러서 돌려야 하는 것인 줄 모르고 불량품이라고 반품했다고 하는 웃지 못할 에피소드도 있습니다. 마우스 워시가 농축 제품인 줄 모르면 용량에 비해 엄청 나게 비싸 보입니다.
             최소한 구입가격(표시 가격)과 사용가격(사용 기간 환산 가격)을 구분할 줄 알아야 합니다
             제품에 대해 제대로 알기 위해서 제품 공부를 꼭 해야 합니다. 제품 강의나 테이프를 들어야 하는 이유가 여기에 있습니다.
-            사업을 시작하였다면 집에 있는 생필품부터 바꾸어 써야 합니다. 비누, 세제 등 몇 푼 되지 않는 생필품이 아깝다고 해서 제품 사용을 미루는 것은 사업 자체를 미루는 격입니다. 간혹 자신은 제품을 쓰지 않으면서 다른 사람이 쓰기를 바라는 사람들이 있습니다. 이것은 이 사업을 그저 공짜 사업 정
+            사업을 시작하였다면 집에 있는 생필품부터 바꾸어 써야 합니다. 비누, 세제 등 몇 푼 되지 않는 생필품이 아깝다고 해서 제품 사용을 미루는 것입니다. 간혹 자신은 제품을 쓰지 않으면서 다른 사람이 쓰기를 바라는 사람들이 있습니다. 이것은 이 사업을 그저 공짜 사업 정
             도로 이해한 것입니다. 피라미드 상술이 나쁘다고 욕하면서 정작 자신이 다른 사람을 이용해 사업을 하려는 격이 됩니다.
             또한 제품을 사용하는 것을 지출로 생각하는 사업자들이 간혹 있습니다만, 어차피 쓸 제품을 바꿔 쓰는 것이기 때문에 불필요한 지출이라 얘기할 수 없습니다.
             기존에 사용하고 있는 제품이 정말 아깝다면, 작은 박스에 그 제품을 넣어 봉하십시오. 그리고
@@ -418,7 +424,7 @@ async def search_schedules(request: Request, db: Session = Depends(get_db), curr
     ).all()
 
     for schedule in schedules:
-        activity = schedule.activity.split(": ")[1]  # "1: 운동" 형식에서 "운동동" 추출
+        activity = schedule.activity.split(": ")[1]  # "1: 운동" 형식에서 "운동" 추출
         if activity in counts:
             counts[activity] += 1
 
@@ -432,6 +438,133 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     if exc.status_code == status.HTTP_401_UNAUTHORIZED:
         return templates.TemplateResponse("login.html", {"request": request, "error": "인증되지 않았습니다."})
     raise exc
+
+# 관리자 인증 의존성 추가
+def get_current_admin_user(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    if user.username != "k2hcis03":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="관리자 권한이 필요합니다.",
+        )
+    return user
+
+# 관리자 대시보드 라우트 - GET 요청 추가
+@app.get("/admin_dashboard", response_class=HTMLResponse)
+async def admin_dashboard_get(request: Request, db: Session = Depends(get_db), current_admin: User = Depends(get_current_admin_user)):
+    return templates.TemplateResponse(
+        "admin_dashboard.html",
+        {
+            "request": request,
+            "users": db.query(User).all(),
+            "selected_start_date": None,
+            "selected_end_date": None,
+            "selected_users": [],
+            "activities": ["운동", "책읽기", "음원듣기", "미팅 참석", "제품이용", "사업설명", "소비자 관리", "상담", "신뢰 쌓기", "e-com"],
+            "data": []
+        }
+    )
+
+# 관리자 대시보드 라우트 - POST 요청
+@app.post("/admin_dashboard")
+async def admin_dashboard_post(request: Request, db: Session = Depends(get_db), current_admin: User = Depends(get_current_admin_user)):
+    form = await request.form()
+    start_date = form.get("start_date")
+    end_date = form.get("end_date")
+    selected_user_ids = form.getlist("user_ids")
+    download_csv = form.get("download_csv")  # CSV 다운로드 버튼 클릭 여부 확인
+    
+    if not start_date or not end_date or not selected_user_ids:
+        return templates.TemplateResponse("error.html", {"request": request, "error": "모든 필드를 입력해야 합니다."})
+    
+    start = dt_date.fromisoformat(start_date)
+    end = dt_date.fromisoformat(end_date)
+    
+    schedules = db.query(Schedule).filter(
+        Schedule.user_id.in_(selected_user_ids),
+        Schedule.date >= start,
+        Schedule.date <= end,
+        Schedule.completed == True
+    ).all()
+    print(f"hello1,{download_csv}")
+    # 활동별 완료 횟수 집계
+    activities = ["운동", "책읽기", "음원듣기", "미팅 참석", "제품이용", "사업설명", "소비자 관리", "상담", "신뢰 쌓기", "e-com"]
+    counts = {activity: 0 for activity in activities}
+    
+    for schedule in schedules:
+        activity = schedule.activity.split(": ")[1]  # "1: 운동" 형식에서 "운동" 추출
+        if activity in counts:
+            counts[activity] += 1
+    
+    data = [counts[activity] for activity in activities]
+    
+    if download_csv:
+        print(f"hello2,{download_csv}")
+        # CSV 다운로드 요청 처리
+        user_schedule_counts = {}
+        for user_id in selected_user_ids:
+            user_schedule_counts[user_id] = {activity: 0 for activity in activities}
+        
+        for schedule in schedules:
+            user_id = str(schedule.user_id)
+            activity = schedule.activity.split(": ")[1]
+            if activity in activities:
+                user_schedule_counts[user_id][activity] += 1
+        
+        # 사용자 목록 조회
+        users = db.query(User).filter(User.id.in_(selected_user_ids)).all()
+        user_dict = {str(user.id): user.username for user in users}
+        
+        # CSV 생성
+        def generate_csv():
+            from io import BytesIO, TextIOWrapper
+            buffer = BytesIO()
+            wrapper = TextIOWrapper(buffer, encoding='utf-8-sig', newline='')
+            writer = csv.writer(wrapper)
+            header = ["사용자", "시작 날짜", "끝 날짜"] + activities
+            writer.writerow(header)
+            for user_id, activity_counts in user_schedule_counts.items():
+                row = [
+                    user_dict.get(user_id, "Unknown"),
+                    start_date,
+                    end_date
+                ] + [activity_counts[activity] for activity in activities]
+                writer.writerow(row)
+            wrapper.flush()
+            buffer.seek(0)
+            yield buffer.read()
+        
+        headers = {
+            'Content-Disposition': f'attachment; filename="schedules_{start_date}_to_{end_date}.csv"'
+        }
+        return StreamingResponse(generate_csv(), media_type="text/csv", headers=headers)
+    
+    # 그래프 생성 요청 처리
+    return templates.TemplateResponse(
+        "admin_dashboard.html",
+        {
+            "request": request,
+            "users": db.query(User).all(),
+            "selected_start_date": start_date,
+            "selected_end_date": end_date,
+            "selected_users": selected_user_ids,
+            "activities": activities,
+            "data": data
+        }
+    )
+
+# 앱 시작 시 관리자 계정 생성
+@app.on_event("startup")
+def startup_event():
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    admin_user = db.query(User).filter(User.username == "k2hcis03").first()
+    if not admin_user:
+        hashed_password = get_password_hash("freedom")
+        admin_user = User(username="k2hcis03", hashed_password=hashed_password)
+        db.add(admin_user)
+        db.commit()
+    db.close()
 
 # 다른 라우트 및 로직
 
