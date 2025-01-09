@@ -29,7 +29,7 @@
         <h2 class="text-center mb-4">관리자 대시보드</h2>
         
         <!-- 날짜 및 사용자 선택 공통 폼 -->
-        <form method="post" action="/admin_dashboard">
+        <form method="post" action="/admin_dashboard" id="adminForm">
             <div class="row mb-3">
                 <div class="col-md-4">
                     <label for="start_date" class="form-label">시작 날짜</label>
@@ -103,6 +103,12 @@
                 }
             }
         });
+
+        // 폼 제출 함수
+        function submitForm(actionType) {
+            document.getElementById('action').value = actionType;
+            document.getElementById('adminForm').submit();
+        }
     </script>
     {% endif %}
 
